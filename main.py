@@ -82,19 +82,26 @@ def generate_prompt_with_llama():
     """
 
     payload = {
-        "messages": [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message}
-        ],
-        "temperature": 0.7,
-        "max_tokens": 300
+        "model": "llama3.1",
+        "prompt": system_message + "\n\n" + user_message,
+        "temperature": 0.7
     }
 
     try:
         response = requests.post(LLAMA_API_URL, json=payload)
         if response.status_code == 200:
-            content = response.json()["choices"][0]["message"]["content"]
-            content = content.strip()
+            # content = response.json()["choices"][0]["message"]["content"]
+            # content = content.strip()
+
+            # Process streaming response
+            content = ""
+            for line in response.text.strip().split('\n'):
+                if line:
+                    json_response = json.loads(line)
+                    if 'response' in json_response:
+                        content += json_response['response']
+                    if json_response.get('done', False):
+                        break
 
             return content, {"environment": environment, "time_weather": time_weather, "fire_stage": fire_stage, "pov": pov}
         else:
