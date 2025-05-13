@@ -7,7 +7,7 @@ import logging
 import websocket
 import threading
 from datetime import datetime
-from config import COMFYUI_API_URL, COMFYUI_WS_URL, LLAMA_API_URL, OUTPUT_DIR, METADATA_FILE
+from config import COMFYUI_API_URL, COMFYUI_VIEW_URL, COMFYUI_BASE_URL, COMFYUI_WS_URL, LLAMA_API_URL, OUTPUT_DIR, METADATA_FILE
 
 # Set up logging
 log_dir = "logs"
@@ -206,7 +206,14 @@ def on_message(ws, message):
         if data.get("type") == "executing":
             logger.info(f"Executing node: {data.get('data', {}).get('node')}")
         elif data.get("type") == "progress":
-            logger.info(f"Progress: {data.get('data', {}).get('value') * 100:.0f}%")
+            # ComfyUI sends progress as a value between 0 and 1
+            progress = min(1.0, data.get('data', {}).get('value', 0))
+            if progress > last_progress:
+                logger.info(f"Overall progress: {progress * 100:.1f}%")
+                last_progress = progress
+                if progress >= 1.0:
+                    logger.info("Progress reached 100%")
+                    execution_completed = True
         elif data.get("type") == "executed":
             logger.info("Node execution completed")
     except Exception as e:
@@ -225,128 +232,121 @@ def on_open(ws):
     logger.info("WebSocket connection established")
 
 def run_comfyui_workflow(workflow):
-    """
-    Execute the workflow on ComfyUI API and return the image
-    """
+    """Run a workflow in ComfyUI and return the generated image."""
     try:
-        # First check if ComfyUI server is running
-        try:
-            health_check = requests.get("http://127.0.0.1:8188/")
-            if health_check.status_code != 200:
-                logger.error(f"ComfyUI server is not responding properly. Status code: {health_check.status_code}")
-                return None, None
-            logger.info("ComfyUI server is running and responding")
-        except requests.exceptions.ConnectionError:
-            logger.error("Could not connect to ComfyUI server. Make sure it's running at the configured URL.")
-            return None, None
-
-        # Ensure output directory exists and is writable
-        try:
-            os.makedirs(OUTPUT_DIR, exist_ok=True)
-            test_file = os.path.join(OUTPUT_DIR, "test_write.tmp")
-            with open(test_file, "w") as f:
-                f.write("test")
-            os.remove(test_file)
-            logger.info(f"Output directory {OUTPUT_DIR} is writable")
-        except Exception as e:
-            logger.error(f"Output directory is not writable: {str(e)}")
-            return None, None
-
-        # Send the workflow
+        # Send the workflow to ComfyUI
         logger.info("Sending workflow to ComfyUI...")
         response = requests.post(COMFYUI_API_URL, json={"prompt": workflow})
+        response.raise_for_status()
         
-        if response.status_code == 200:
-            prompt_id = response.json()["prompt_id"]
-            logger.info(f"Workflow accepted with prompt_id: {prompt_id}")
+        # Get the prompt_id from the response
+        prompt_id = response.json()["prompt_id"]
+        logger.info(f"Workflow accepted with prompt_id: {prompt_id}")
+        
+        # Set up WebSocket connection for monitoring
+        def on_message(ws, message):
+            nonlocal execution_status
+            data = json.loads(message)
+            if data["type"] == "execution_complete":
+                execution_status["completed"] = True
+                logger.info("Execution completed")
+            elif data["type"] == "executed":
+                logger.info(f"Node executed: {data.get('data', {}).get('node')}")
+            elif data["type"] == "progress":
+                progress = data.get("data", {}).get("value", 0) * 100
+                logger.info(f"Progress: {progress:.1f}%")
+
+        def on_error(ws, error):
+            logger.error(f"WebSocket error: {error}")
+
+        def on_close(ws, close_status_code, close_msg):
+            logger.info("WebSocket connection closed")
+
+        def on_open(ws):
+            logger.info("WebSocket connection established")
             
-            # Set up WebSocket connection for status updates
-            ws = websocket.WebSocketApp(
-                COMFYUI_WS_URL,
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close,
-                on_open=on_open
-            )
+        # Create and start WebSocket in a separate thread
+        execution_status = {"completed": False}
+        ws = websocket.WebSocketApp(
+            COMFYUI_WS_URL,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+            on_open=on_open
+        )
+        
+        wst = threading.Thread(target=ws.run_forever)
+        wst.daemon = True
+        wst.start()
+        
+        # Wait for execution to complete with timeout
+        start_time = time.time()
+        while not execution_status["completed"]:
+            time.sleep(1)
+            elapsed = time.time() - start_time
             
-            # Start WebSocket connection in a separate thread
-            ws_thread = threading.Thread(target=ws.run_forever)
-            ws_thread.daemon = True
-            ws_thread.start()
-            
-            # Wait for the image to be generated with proper status checking
-            max_wait_time = 120  # Maximum wait time in seconds
-            start_time = time.time()
-            image_found = False
-            
-            while time.time() - start_time < max_wait_time:
-                try:
-                    # Check execution status
-                    status_response = requests.get(f"{COMFYUI_API_URL}/prompt")
-                    if status_response.status_code == 200:
-                        status_data = status_response.json()
-                        logger.debug(f"Status data: {json.dumps(status_data, indent=2)}")
-                        
-                        # Check if our prompt is still executing
-                        if prompt_id in status_data:
-                            logger.info("Workflow is still running...")
-                        else:
-                            # Check for the output image
-                            output_response = requests.get(f"{COMFYUI_API_URL}/output")
-                            if output_response.status_code == 200:
-                                output_data = output_response.json()
-                                logger.debug(f"Output data: {json.dumps(output_data, indent=2)}")
-                                
-                                # Look for our image in the output
-                                for node_id, node_output in output_data.items():
-                                    if "images" in node_output:
-                                        for image_data in node_output["images"]:
-                                            if "filename" in image_data:
-                                                # Get the image data
-                                                image_response = requests.get(f"{COMFYUI_API_URL}/view?filename={image_data['filename']}")
-                                                if image_response.status_code == 200:
-                                                    # Save the image to our output directory
-                                                    image_path = os.path.join(OUTPUT_DIR, f"FS_{prompt_id}.png")
-                                                    with open(image_path, "wb") as f:
-                                                        f.write(image_response.content)
-                                                    logger.info(f"Image saved successfully at: {image_path}")
-                                                    image_found = True
-                                                    break
-                    else:
-                        logger.error(f"Failed to get execution status. Status code: {status_response.status_code}")
-                        logger.error(f"Response content: {status_response.text}")
-                except Exception as e:
-                    logger.error(f"Error during status check: {str(e)}")
+            # Check if the prompt is still being processed
+            try:
+                history_response = requests.get(f"{COMFYUI_BASE_URL}/history/{prompt_id}")
+                if history_response.status_code == 200:
+                    history_data = history_response.json()
+                    if history_data.get(prompt_id, {}).get("status", {}).get("completed", False):
+                        execution_status["completed"] = True
+                        logger.info("Execution completed according to history API")
+            except Exception as e:
+                logger.warning(f"Error checking history: {e}")
                 
-                if image_found:
-                    break
-                    
-                time.sleep(2)  # Wait 2 seconds before checking again
-                logger.info(f"Still waiting for image generation... ({int(time.time() - start_time)} seconds elapsed)")
-            
-            # Close WebSocket connection
-            ws.close()
-            
-            if image_found:
-                image_path = os.path.join(OUTPUT_DIR, f"FS_{prompt_id}.png")
-                if os.path.exists(image_path):
-                    logger.info(f"Image verified at path: {image_path}")
-                    return prompt_id, image_path
-                else:
-                    logger.error(f"Image was not saved properly at: {image_path}")
-            else:
-                logger.error("Image generation timed out or failed")
-                # List contents of output directory for debugging
-                logger.info(f"Contents of {OUTPUT_DIR}:")
-                for file in os.listdir(OUTPUT_DIR):
-                    logger.info(f"  - {file}")
-                return None, None
-        else:
-            logger.error(f"Error from ComfyUI API: {response.status_code}")
-            logger.error(f"Response content: {response.text}")
-            return None, None
+            if elapsed > 300:  # 5 minute timeout
+                logger.error("Execution timed out after 5 minutes")
+                break
+        
+        # Close WebSocket connection
+        ws.close()
+        
+        # Wait a moment to ensure files are saved
+        time.sleep(2)
+        
+        try:
+            # Use the history endpoint to get output information
+            history_response = requests.get(f"{COMFYUI_BASE_URL}/history/{prompt_id}")
+            if history_response.status_code == 200:
+                history_data = history_response.json()
+                
+                # Extract the output image filename from history
+                outputs = history_data.get(prompt_id, {}).get("outputs", {})
+                for node_id, node_output in outputs.items():
+                    if "images" in node_output:
+                        # Get the complete filename structure
+                        image_info = node_output["images"][0]
+                        filename = image_info["filename"]
+                        subfolder = image_info.get("subfolder", "")
+                        
+                        # Build the correct URL for the view endpoint
+                        view_url = f"{COMFYUI_VIEW_URL}?filename={filename}"
+                        if subfolder:
+                            view_url += f"&subfolder={subfolder}"
+                            
+                        logger.info(f"Attempting to retrieve image with URL: {view_url}")
+                        
+                        # Download the image
+                        image_response = requests.get(view_url)
+                        image_response.raise_for_status()
+                        
+                        # Save the image
+                        image_path = os.path.join(OUTPUT_DIR, f"FS_{prompt_id}.png")
+                        with open(image_path, "wb") as f:
+                            f.write(image_response.content)
+                            
+                        logger.info(f"Successfully saved image to {image_path}")
+                        return prompt_id, image_path
+        except Exception as e:
+            logger.error(f"Error retrieving image: {e}")
+        
+        logger.error("Failed to retrieve the generated image")
+        return prompt_id, None
+        
     except Exception as e:
-        logger.error(f"Exception when calling ComfyUI API: {str(e)}")
+        logger.error(f"Error in workflow execution: {e}")
         return None, None
 
 def save_metadata(prompt, metadata, image_path, prompt_id):
@@ -419,5 +419,5 @@ def generate_batch(num_images=10):
 
 if __name__ == "__main__":
     logger.info("Starting automated smoke/fire image generation")
-    generate_batch(5)  # Generate 10 images by default
+    generate_batch(2)  # Generate 10 images by default
     logger.info("Batch generation complete")

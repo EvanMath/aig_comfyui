@@ -1,3 +1,5 @@
 # Folders
 .venv
 __pycache__
+logs/*
+fs_dataset/*
