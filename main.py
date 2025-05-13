@@ -83,7 +83,7 @@ def generate_prompt_with_llama():
     prompt generating an image of smoke/fire detection
     scenarios.
 
-    Focus on early detection stages where smoke or initial
+    Focus on early detection stages where smoke or fire
     is just becoming visible. Make your prompts photorealistic
     and detailed.
     """
@@ -96,7 +96,7 @@ def generate_prompt_with_llama():
         - Fire/smoke stage: {fire_stage}
         - Camera perspective: {pov}
 
-    Focus on photorealism and detail. REturn ONLY the prompt text with
+    Focus on photorealism and detail. Return ONLY the prompt text with
     no explanations or additional text.
     """
 
@@ -199,38 +199,6 @@ def create_comfyui_workflow(prompt):
 
     return workflow
 
-def on_message(ws, message):
-    """Handle WebSocket messages"""
-    try:
-        data = json.loads(message)
-        if data.get("type") == "executing":
-            logger.info(f"Executing node: {data.get('data', {}).get('node')}")
-        elif data.get("type") == "progress":
-            # ComfyUI sends progress as a value between 0 and 1
-            progress = min(1.0, data.get('data', {}).get('value', 0))
-            if progress > last_progress:
-                logger.info(f"Overall progress: {progress * 100:.1f}%")
-                last_progress = progress
-                if progress >= 1.0:
-                    logger.info("Progress reached 100%")
-                    execution_completed = True
-        elif data.get("type") == "executed":
-            logger.info("Node execution completed")
-    except Exception as e:
-        logger.error(f"Error processing WebSocket message: {e}")
-
-def on_error(ws, error):
-    """Handle WebSocket errors"""
-    logger.error(f"WebSocket error: {error}")
-
-def on_close(ws, close_status_code, close_msg):
-    """Handle WebSocket connection close"""
-    logger.info("WebSocket connection closed")
-
-def on_open(ws):
-    """Handle WebSocket connection open"""
-    logger.info("WebSocket connection established")
-
 def run_comfyui_workflow(workflow):
     """Run a workflow in ComfyUI and return the generated image."""
     try:
@@ -243,18 +211,31 @@ def run_comfyui_workflow(workflow):
         prompt_id = response.json()["prompt_id"]
         logger.info(f"Workflow accepted with prompt_id: {prompt_id}")
         
-        # Set up WebSocket connection for monitoring
+        # Create and start WebSocket in a separate thread
+        execution_status = {"completed": False}
+        last_progress = 0
+        
         def on_message(ws, message):
-            nonlocal execution_status
-            data = json.loads(message)
-            if data["type"] == "execution_complete":
-                execution_status["completed"] = True
-                logger.info("Execution completed")
-            elif data["type"] == "executed":
-                logger.info(f"Node executed: {data.get('data', {}).get('node')}")
-            elif data["type"] == "progress":
-                progress = data.get("data", {}).get("value", 0) * 100
-                logger.info(f"Progress: {progress:.1f}%")
+            nonlocal execution_status, last_progress
+            try:
+                data = json.loads(message)
+                if data.get("type") == "execution_complete":
+                    execution_status["completed"] = True
+                    logger.info("Execution completed")
+                elif data.get("type") == "executing":
+                    logger.info(f"Executing node: {data.get('data', {}).get('node')}")
+                elif data.get("type") == "progress":
+                    # ComfyUI sends progress as a value between 0 and 1
+                    progress = min(1.0, data.get('data', {}).get('value', 0))
+                    if progress > last_progress:
+                        logger.info(f"Overall progress: {progress * 100:.1f}%")
+                        last_progress = progress
+                        if progress >= 1.0:
+                            logger.info("Progress reached 100%")
+                elif data.get("type") == "executed":
+                    logger.info("Node execution completed")
+            except Exception as e:
+                logger.error(f"Error processing WebSocket message: {e}")
 
         def on_error(ws, error):
             logger.error(f"WebSocket error: {error}")
@@ -265,8 +246,6 @@ def run_comfyui_workflow(workflow):
         def on_open(ws):
             logger.info("WebSocket connection established")
             
-        # Create and start WebSocket in a separate thread
-        execution_status = {"completed": False}
         ws = websocket.WebSocketApp(
             COMFYUI_WS_URL,
             on_message=on_message,
