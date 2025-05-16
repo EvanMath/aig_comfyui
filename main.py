@@ -163,7 +163,7 @@ def create_comfyui_workflow(prompt):
             "inputs": {
                 "width": 512,
                 "height": 512,
-                "batch_size": 1
+                "batch_size": 2 # this is the generated batch size from a single prompt
             },
             "class_type": "EmptyLatentImage"
         },
@@ -293,31 +293,35 @@ def run_comfyui_workflow(workflow):
                 
                 # Extract the output image filename from history
                 outputs = history_data.get(prompt_id, {}).get("outputs", {})
+                image_paths = []
                 for node_id, node_output in outputs.items():
                     if "images" in node_output:
-                        # Get the complete filename structure
-                        image_info = node_output["images"][0]
-                        filename = image_info["filename"]
-                        subfolder = image_info.get("subfolder", "")
-                        
-                        # Build the correct URL for the view endpoint
-                        view_url = f"{COMFYUI_VIEW_URL}?filename={filename}"
-                        if subfolder:
-                            view_url += f"&subfolder={subfolder}"
+                        # Process all images in the batch
+                        for image_info in node_output["images"]:
+                            filename = image_info["filename"]
+                            subfolder = image_info.get("subfolder", "")
                             
-                        logger.info(f"Attempting to retrieve image with URL: {view_url}")
-                        
-                        # Download the image
-                        image_response = requests.get(view_url)
-                        image_response.raise_for_status()
-                        
-                        # Save the image
-                        image_path = os.path.join(OUTPUT_DIR, f"FS_{prompt_id}.png")
-                        with open(image_path, "wb") as f:
-                            f.write(image_response.content)
+                            # Build the correct URL for the view endpoint
+                            view_url = f"{COMFYUI_VIEW_URL}?filename={filename}"
+                            if subfolder:
+                                view_url += f"&subfolder={subfolder}"
+                                
+                            logger.info(f"Attempting to retrieve image with URL: {view_url}")
                             
-                        logger.info(f"Successfully saved image to {image_path}")
-                        return prompt_id, image_path
+                            # Download the image
+                            image_response = requests.get(view_url)
+                            image_response.raise_for_status()
+                            
+                            # Save the image with a unique identifier
+                            image_path = os.path.join(OUTPUT_DIR, f"FS_{prompt_id}_{len(image_paths)}.png")
+                            with open(image_path, "wb") as f:
+                                f.write(image_response.content)
+                                
+                            logger.info(f"Successfully saved image to {image_path}")
+                            image_paths.append(image_path)
+                
+                if image_paths:
+                    return prompt_id, image_paths
         except Exception as e:
             logger.error(f"Error retrieving image: {e}")
         
@@ -383,10 +387,11 @@ def generate_batch(num_images=10):
         result = run_comfyui_workflow(workflow)
 
         if result:
-            prompt_id, image_path = result
-            if image_path:
-                save_metadata(prompt, metadata, image_path, prompt_id)
-                logger.info(f"Successfully generated and saved image {i+1}/{num_images}")
+            prompt_id, image_paths = result
+            if image_paths:
+                for image_path in image_paths:
+                    save_metadata(prompt, metadata, image_path, prompt_id)
+                    logger.info(f"Successfully generated and saved image {i+1}/{num_images}")
             else:
                 logger.error(f"Failed to save image {i+1}/{num_images}")
         else:
