@@ -7,7 +7,19 @@ import logging
 import websocket
 import threading
 from datetime import datetime
-from config import COMFYUI_API_URL, COMFYUI_VIEW_URL, COMFYUI_BASE_URL, COMFYUI_WS_URL, LLAMA_API_URL, OUTPUT_DIR, METADATA_FILE
+from config import (
+    COMFYUI_API_URL, 
+    COMFYUI_VIEW_URL, 
+    COMFYUI_BASE_URL, 
+    COMFYUI_WS_URL, 
+    LLAMA_API_URL, 
+    OUTPUT_DIR, 
+    METADATA_FILE, 
+    ENVIRONMENTS, 
+    TIME_WEATHER, 
+    FS_STAGES, 
+    POVs
+)
 
 # Set up logging
 log_dir = "logs"
@@ -28,44 +40,6 @@ logger = logging.getLogger(__name__)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 logger.info(f"Ensuring output directory exists: {OUTPUT_DIR}")
 
-# Types of environments for various scenarios
-ENVIRONMENTS = [
-    "dense forest", "pine forest", "oak woodland", "eucalyptus forest",
-    "urban residential area", "apartment complex", "suburban neighborhood", "city center",
-    "industrial factory", "chemical plant", "oil refinery", "manufacturing facility",
-    "warehouse", "office building", "shopping mall", "school campus",
-    "rural landscape", "farmland", "mountain terrain", "grassland",
-    "national park", "wilderness area", "campground", "hiking trail"
-]
-
-# Time of day and weather conditions
-TIME_WEATHER = [
-    "early morning with clear sky", "bright sunny day", "cloudy afternoon", 
-    "sunset with orange sky", "dusk with fading light", "night with moonlight",
-    "foggy morning", "misty conditions", "after light rain", "windy day",
-    "humid summer day", "dry autumn afternoon", "cold winter morning", "spring evening"
-]
-
-# Fire and Smoke Stages
-FS_STAGES = [
-    "very early stage with barely visible thin smoke wisp rising between trees",
-    "small amount of white smoke rising slowly, no visible flames yet",
-    "thin smoke column starting to form, barely noticeable",
-    "light gray smoke beginning to accumulate near ground level",
-    "small smoke plume developing, with tiny ember just becoming visible",
-    "early smoke formation with first small flames beginning to appear",
-    "visible smoke with small flames starting to spread",
-    "moderate smoke development with growing flames",
-    "thickening smoke with established fire beginning to spread"
-]
-
-# POVs
-POVs = [
-    "aerial drone view from 50 meters height", "aerial drone view from 100 meters height",
-    "security camera perspective mounted on pole", "security camera view from building",
-    "ground level perspective", "from distance of 100 meters", "from hillside overlooking area",
-    "from forest watchtower", "through trees", "from road perspective"
-]
 
 def generate_prompt_with_llama():
     """
