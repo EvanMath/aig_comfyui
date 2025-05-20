@@ -102,9 +102,14 @@ def generate_prompt_with_llama():
         print(f"Exception when calling Llama API: {e}")
         return None, None
 
-def create_comfyui_workflow(prompt):
+def create_comfyui_workflow(prompt, batch_size=1, model_name="sd_xl_base_1.0.safetensors"):
     """
     Create ComfUI workflow for Stable Diffusion XL with given prompt
+    
+    Args:
+        prompt (str): The text prompt for image generation
+        batch_size (int): Number of images to generate per prompt (default: 1)
+        model_name (str): Name of the model checkpoint to use (default: sd_xl_base_1.0.safetensors)
     """
     negative_prompt = "low quality, bad image, blurry, distorted, deformed, disfigured, text, watermark, signature, poor composition, unrealistic, cartoonish"
 
@@ -129,7 +134,7 @@ def create_comfyui_workflow(prompt):
         },
         "4": {
             "inputs": {
-                "ckpt_name": "sd_xl_base_1.0.safetensors"
+                "ckpt_name": model_name
             },
             "class_type": "CheckpointLoaderSimple"
         },
@@ -137,7 +142,7 @@ def create_comfyui_workflow(prompt):
             "inputs": {
                 "width": 512,
                 "height": 512,
-                "batch_size": 2 # this is the generated batch size from a single prompt
+                "batch_size": batch_size
             },
             "class_type": "EmptyLatentImage"
         },
@@ -341,14 +346,19 @@ def save_metadata(prompt, metadata, image_path, prompt_id):
     except Exception as e:
         logger.error(f"Error saving metadata: {str(e)}")
 
-def generate_batch(num_images=10):
+def generate_batch(num_prompts=2, batch_size=2, model_name="sd_xl_base_1.0.safetensors"):
     """
-    Generate a batch of images
+    Generate a batch of images from multiple prompts
+    
+    Args:
+        num_prompts (int): Number of different prompts to generate (default: 2)
+        batch_size (int): Number of images to generate per prompt (default: 1)
+        model_name (str): Name of the model checkpoint to use (default: sd_xl_base_1.0.safetensors)
     """
-    logger.info(f"Starting batch generation of {num_images} images")
+    logger.info(f"Starting batch generation of {num_prompts} prompts with {batch_size} images per prompt")
 
-    for i in range(num_images):
-        logger.info(f"Generating image {i+1}/{num_images}")
+    for i in range(num_prompts):
+        logger.info(f"Generating prompt {i+1}/{num_prompts}")
         
         prompt, metadata = generate_prompt_with_llama()
         if not prompt:
@@ -357,7 +367,7 @@ def generate_batch(num_images=10):
 
         logger.info(f"Generated prompt: {prompt}")
 
-        workflow = create_comfyui_workflow(prompt)
+        workflow = create_comfyui_workflow(prompt, batch_size=batch_size, model_name=model_name)
         result = run_comfyui_workflow(workflow)
 
         if result:
@@ -365,11 +375,11 @@ def generate_batch(num_images=10):
             if image_paths:
                 for image_path in image_paths:
                     save_metadata(prompt, metadata, image_path, prompt_id)
-                    logger.info(f"Successfully generated and saved image {i+1}/{num_images}")
+                    logger.info(f"Successfully generated and saved image for prompt {i+1}/{num_prompts}")
             else:
-                logger.error(f"Failed to save image {i+1}/{num_images}")
+                logger.error(f"Failed to save images for prompt {i+1}/{num_prompts}")
         else:
-            logger.error(f"Failed to generate image {i+1}/{num_images}")
+            logger.error(f"Failed to generate images for prompt {i+1}/{num_prompts}")
         
         time.sleep(5)  # Wait between generations
 
@@ -377,5 +387,5 @@ def generate_batch(num_images=10):
 
 if __name__ == "__main__":
     logger.info("Starting automated smoke/fire image generation")
-    generate_batch(2)  # Generate 10 images by default
+    generate_batch(num_prompts=2, batch_size=2)  # Generate 2 prompts with 2 images each
     logger.info("Batch generation complete")
