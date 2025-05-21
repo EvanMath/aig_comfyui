@@ -4,8 +4,9 @@ import time
 import random
 import requests
 import logging
-import websocket
+from websocket import WebSocketApp
 import threading
+import argparse
 from datetime import datetime
 from config import (
     COMFYUI_API_URL, 
@@ -204,15 +205,10 @@ def run_comfyui_workflow(workflow):
                 elif data.get("type") == "executing":
                     logger.info(f"Executing node: {data.get('data', {}).get('node')}")
                 elif data.get("type") == "progress":
-                    # ComfyUI sends progress as a value between 0 and 1
                     progress = min(1.0, data.get('data', {}).get('value', 0))
                     if progress > last_progress:
                         logger.info(f"Overall progress: {progress * 100:.1f}%")
                         last_progress = progress
-                        if progress >= 1.0:
-                            logger.info("Progress reached 100%")
-                elif data.get("type") == "executed":
-                    logger.info("Node execution completed")
             except Exception as e:
                 logger.error(f"Error processing WebSocket message: {e}")
 
@@ -225,7 +221,7 @@ def run_comfyui_workflow(workflow):
         def on_open(ws):
             logger.info("WebSocket connection established")
             
-        ws = websocket.WebSocketApp(
+        ws = WebSocketApp(
             COMFYUI_WS_URL,
             on_message=on_message,
             on_error=on_error,
@@ -305,7 +301,7 @@ def run_comfyui_workflow(workflow):
             logger.error(f"Error retrieving image: {e}")
         
         logger.error("Failed to retrieve the generated image")
-        return prompt_id, None
+        return None, None
         
     except Exception as e:
         logger.error(f"Error in workflow execution: {e}")
@@ -346,46 +342,116 @@ def save_metadata(prompt, metadata, image_path, prompt_id):
     except Exception as e:
         logger.error(f"Error saving metadata: {str(e)}")
 
-def generate_batch(num_prompts=2, batch_size=2, model_name="sd_xl_base_1.0.safetensors"):
+def generate_custom_prompt_with_llama(topic):
     """
-    Generate a batch of images from multiple prompts
+    Generate image prompt using Llama for a custom topic
     
     Args:
-        num_prompts (int): Number of different prompts to generate (default: 2)
-        batch_size (int): Number of images to generate per prompt (default: 1)
-        model_name (str): Name of the model checkpoint to use (default: sd_xl_base_1.0.safetensors)
+        topic (str): The topic to generate prompts for
     """
-    logger.info(f"Starting batch generation of {num_prompts} prompts with {batch_size} images per prompt")
+    system_message = """
+    You are an expert at creating detailed prompts
+    for AI image generation. Create realistic, detailed
+    prompts for the given topic.
 
-    for i in range(num_prompts):
-        logger.info(f"Generating prompt {i+1}/{num_prompts}")
-        
-        prompt, metadata = generate_prompt_with_llama()
-        if not prompt:
-            logger.error("Failed to generate a prompt. Skipping.")
-            continue
+    Focus on creating photorealistic and detailed prompts
+    that would generate high-quality images.
+    """
 
-        logger.info(f"Generated prompt: {prompt}")
+    user_message = f"""
+    Create a single detailed image generation prompt for the topic:
+    {topic}
 
-        workflow = create_comfyui_workflow(prompt, batch_size=batch_size, model_name=model_name)
-        result = run_comfyui_workflow(workflow)
+    Focus on photorealism and detail. Return ONLY the prompt text with
+    no explanations or additional text.
+    """
 
-        if result:
-            prompt_id, image_paths = result
-            if image_paths:
-                for image_path in image_paths:
-                    save_metadata(prompt, metadata, image_path, prompt_id)
-                    logger.info(f"Successfully generated and saved image for prompt {i+1}/{num_prompts}")
-            else:
-                logger.error(f"Failed to save images for prompt {i+1}/{num_prompts}")
+    payload = {
+        "model": "llama3.1",
+        "prompt": system_message + "\n\n" + user_message,
+        "temperature": 0.7
+    }
+
+    try:
+        response = requests.post(LLAMA_API_URL, json=payload)
+        if response.status_code == 200:
+            # Process streaming response
+            content = ""
+            for line in response.text.strip().split('\n'):
+                if line:
+                    json_response = json.loads(line)
+                    if 'response' in json_response:
+                        content += json_response['response']
+                    if json_response.get('done', False):
+                        break
+
+            return content, {"topic": topic}
         else:
-            logger.error(f"Failed to generate images for prompt {i+1}/{num_prompts}")
-        
-        time.sleep(5)  # Wait between generations
+            print(f"Error from Llama API: {response.status_code}")
+            return None, None
+    except Exception as e:
+        print(f"Exception when calling Llama API: {e}")
+        return None, None
 
-    logger.info("Batch generation complete")
+def generate_batch(mode="auto", topic=None, num_prompts=2, batch_size=2, model_name="sd_xl_base_1.0.safetensors"):
+    """
+    Generate a batch of images based on the specified mode
+    
+    Args:
+        mode (str): Either "auto" for wildfire prompts or "custom" for custom topic
+        topic (str): The topic to generate prompts for (only used in custom mode)
+        num_prompts (int): Number of different prompts to generate
+        batch_size (int): Number of images to generate per prompt
+        model_name (str): Name of the model checkpoint to use
+    """
+    for i in range(num_prompts):
+        if mode == "auto":
+            prompt, metadata = generate_prompt_with_llama()
+        else:
+            prompt, metadata = generate_custom_prompt_with_llama(topic)
+            
+        if prompt:
+            logger.info(f"Generated prompt {i+1}/{num_prompts}: {prompt}")
+            
+            # Create and run workflow
+            workflow = create_comfyui_workflow(prompt, batch_size, model_name)
+            result = run_comfyui_workflow(workflow)
+            
+            if result:
+                prompt_id, image_paths = result
+                if image_paths:
+                    for image_path in image_paths:
+                        save_metadata(prompt, metadata, image_path, prompt_id)
+            else:
+                logger.error(f"Failed to generate images for prompt {i+1}/{num_prompts}")
+        else:
+            logger.error(f"Failed to generate prompt {i+1}/{num_prompts}")
+
+def main():
+    parser = argparse.ArgumentParser(description='Generate images using ComfyUI and Llama')
+    parser.add_argument('--mode', choices=['auto', 'custom'], default='auto',
+                      help='Generation mode: auto for wildfire prompts, custom for custom topic')
+    parser.add_argument('--topic', type=str,
+                      help='Topic for custom mode (required if mode is custom)')
+    parser.add_argument('--num-prompts', type=int, default=2,
+                      help='Number of different prompts to generate')
+    parser.add_argument('--batch-size', type=int, default=2,
+                      help='Number of images to generate per prompt')
+    parser.add_argument('--model', type=str, default="sd_xl_base_1.0.safetensors",
+                      help='Model checkpoint to use')
+
+    args = parser.parse_args()
+
+    if args.mode == 'custom' and not args.topic:
+        parser.error("--topic is required when using custom mode")
+
+    generate_batch(
+        mode=args.mode,
+        topic=args.topic,
+        num_prompts=args.num_prompts,
+        batch_size=args.batch_size,
+        model_name=args.model
+    )
 
 if __name__ == "__main__":
-    logger.info("Starting automated smoke/fire image generation")
-    generate_batch(num_prompts=2, batch_size=2)  # Generate 2 prompts with 2 images each
-    logger.info("Batch generation complete")
+    main()
